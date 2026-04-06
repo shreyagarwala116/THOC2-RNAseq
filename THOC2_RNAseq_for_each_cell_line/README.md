@@ -29,48 +29,48 @@ THOC2_RNAseq/ \
 │ │ ├── iPSC/ \
 │ │ │ ├── gene.counts.txt \
 │ │ │ └── transcript.counts.txt \
-│ │ └── LCL/
-│ │ ├── gene.counts.txt
-│ │ └── transcript.counts.txt
-│ │
-│ ├── metadata/ # Sample metadata
-│ │ ├── pdata_iPSC.csv
-│ │ ├── pdata_LCL.csv
-│ │ └── pdata_fibroblast.csv
-│ │
-│ └── refData/ # Reference transcriptome
-│ │ └── GCA_000001405.15_GRCh38_no_alt_analysis_set.fna.gz
-│
-├── results/ # Analysis outputs
-│ ├── fibroblast/
-│ │ ├── DEGs_biological_replicates/
-│ │   ├── GSEA/
-│ │   ├── Deletion_vs_WT_allGenes.tsv
-│ │   └── limma_decideTests_allGenes.xlsx
-│ │ └── images/
-│ │   ├── Correlation/
-│ │   └── QC/
-│ │
-│ ├── iPSC/
-│ │ ├── DEGs_biological_replicates/
-│ │ ├── DEGs_technical_replicates/
-│ │ │ └── GSEA, limma, TSV files
-│ │ └── images/
-│ │ ├── Correlation/
-│ │ ├── Pluripotency/
-│ │ ├── QC/
-│ │ ├── Rloop/
-│ │ └── TREX_complex/
-│ │
-│ └── LCL/
-│ │ ├── DEGs_biological_replicates/
-│ │   ├── GSEA/
-│ │   ├── Missense_vs_WT_allGenes.tsv
-│ │   └── limma_decideTests_allGenes.xlsx
-│ │ └── images/
-│ │   ├── Correlation/
-│ │   └── QC/
-│ 
+│ │ └── LCL/ \
+│ │ ├── gene.counts.txt \
+│ │ └── transcript.counts.txt \
+│ │ \
+│ ├── metadata/ # Sample metadata \
+│ │ ├── pdata_iPSC.csv \
+│ │ ├── pdata_LCL.csv \
+│ │ └── pdata_fibroblast.csv \
+│ │ \
+│ └── refData/ # Reference transcriptome \
+│ │ └── GCA_000001405.15_GRCh38_no_alt_analysis_set.fna.gz \
+│ \
+├── results/ # Analysis outputs \
+│ ├── fibroblast/ \
+│ │ ├── DEGs_biological_replicates/ \
+│ │   ├── GSEA/ \
+│ │   ├── Deletion_vs_WT_allGenes.tsv \
+│ │   └── limma_decideTests_allGenes.xlsx \
+│ │ └── images/ \
+│ │   ├── Correlation/ \
+│ │   └── QC/ \
+│ │ \
+│ ├── iPSC/ \
+│ │ ├── DEGs_biological_replicates/ \
+│ │ │ └── limma_decideTests_allGenes.xlsx \
+│ │ ├── DEGs_technical_replicates/ \
+│ │ │ └── GSEA, limma, TSV files \
+│ │ └── images/ \
+│ │ ├── Correlation/ \
+│ │ ├── Pluripotency/ \
+│ │ ├── QC/ \
+│ │ ├── Rloop/ \
+│ │ └── TREX_complex/ \
+│ │ \
+│ └── LCL/ \
+│ │ ├── DEGs_biological_replicates/ \
+│ │   ├── GSEA/ \
+│ │   ├── Missense_vs_WT_allGenes.tsv \
+│ │   └── limma_decideTests_allGenes.xlsx \
+│ │ └── images/ \
+│ │   ├── Correlation/ \
+│ │   └── QC/ \│ 
 └── THOC2_correlation_iPSC_LCL_Fibro_SA.Rmd # Main analysis script
 
 
