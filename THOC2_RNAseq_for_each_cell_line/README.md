@@ -70,7 +70,8 @@ THOC2_RNAseq/ \
 │ │   └── limma_decideTests_allGenes.xlsx \
 │ │ └── images/ \
 │ │   ├── Correlation/ \
-│ │   └── QC/ \│ 
+│ │   └── QC/ \
+| \
 └── THOC2_correlation_iPSC_LCL_Fibro_SA.Rmd # Main analysis script
 
 
