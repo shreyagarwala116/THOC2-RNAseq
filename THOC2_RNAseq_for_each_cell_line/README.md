@@ -21,14 +21,14 @@ The file was too large for GitHub. Please visit https://www.ncbi.nlm.nih.gov/dat
 ## Folder Structure
 THOC2_RNAseq/ \
 │ \
-├── data/
-│ ├── counts/ # Gene and transcript counts
-│ │ ├── fibroblast/
-│ │ │ ├── gene.counts.txt
-│ │ │ └── transcript.counts.txt
-│ │ ├── iPSC/
-│ │ │ ├── gene.counts.txt
-│ │ │ └── transcript.counts.txt
+├── data/ \
+│ ├── counts/ # Gene and transcript counts \
+│ │ ├── fibroblast/ \ 
+│ │ │ ├── gene.counts.txt \
+│ │ │ └── transcript.counts.txt \
+│ │ ├── iPSC/ \
+│ │ │ ├── gene.counts.txt \
+│ │ │ └── transcript.counts.txt \
 │ │ └── LCL/
 │ │ ├── gene.counts.txt
 │ │ └── transcript.counts.txt
