@@ -1,0 +1,9 @@
+,sampleCode,folder,cellType,genotype,variant,sex,species,Grouping
+L438P_1,L438P_1,LCL-THOC2-L438P-CS-01,LCL,Variant,Variant,Male,Human,Variant
+L438P_2,L438P_2,LCL-THOC2-L438P-DS-02,LCL,Variant,Variant,Male,Human,Variant
+Control_1,Control_1,LCL-WT-M-RS-03,LCL,WT,WT,Male,Human,WT
+Control_2,Control_2,LCL-WT-M-ET-10,LCL,WT,WT,Male,Human,WT
+Control_3,Control_3,LCL-WT-M-PK-11,LCL,WT,WT,Male,Human,WT
+Control_4,Control_4,LCL-WT-M-JD-12,LCL,WT,WT,Male,Human,WT
+Control_5,Control_5,LCL-WT-M-FH-16,LCL,WT,WT,Male,Human,WT
+Control_6,Control_6,LCL-WT-M-JL-17,LCL,WT,WT,Male,Human,WT

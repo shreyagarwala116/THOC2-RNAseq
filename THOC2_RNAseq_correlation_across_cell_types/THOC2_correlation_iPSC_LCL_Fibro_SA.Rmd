@@ -1,0 +1,313 @@
+---
+title: "THOC2 RNAseq Analyses - Correlation between iPSC, LCL and Fibroblasts"
+author: "Shreya Agarwala, Lachlan Baer and Mark Corbett"
+date: "21/03/2026"
+output:
+  pdf_document: default
+  html_document:
+      toc: true
+      code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rgl)
+library(kableExtra)
+```
+
+## Introduction  
+The following document is a summary of the analysis method of RNASeq data generated from iPSCs: wild-type (WT), variant *THOC2* Ex37-38del (2 biological clones), *THOC2* p.Leu438Pro, CRISPR-Cas9 corrected hiPSC for p.Leu438Pro (Corrected/WT).  
+The samples consist of three biological replicates of each genotype (WT, Corrected, Variant (Deletion/Missense)) extracted from induced pluripotent stem cells (iPSCs).
+Sample libraries were prepared for sequencing by the service provider BMKGene using the polyA, mRNA enrichment according to the maufacturers protocol (NEBNext® Ultra™ RNA Library Prep Kit for Illumina®).  Strand-specific sequencing was carried by BMKGene on an Illumina HiSeq using a 2 x 150 bp, paired end read strategy.
+Prior to differential gene expression analysis, RNAseq data were psuedo-mapped to the *change:ENSEMBL v84* set of human transcripts using the salmon_total pipeline refer to our [protocol document](https://docs.google.com/document/d/1TbvCCqPcnCx9Xl9MZPZgQquyuG6FG43shAobZbsFB8I/edit#heading=h.lwetuj3o1vx4) and [git repository](https://github.com/speleonut/RNASeq/tree/master/salmon_total.Illumina) for details.
+
+The fibroblasts include three control/WT lines and one Ex37-38 deletion line. 
+The LCLs include six control/WT lines and two p.Leu438Pro lines.
+They were previously sequenced as a part of different study by the Neurogenetics Group. 
+
+## Set up the environment
+The first section of the analysis sets up the software, imports sequence counts and associated sample metadata.  All codes are hidden by default to make the document easier to read but you can reveal them by clicking on *code* to see how the analysis was done.
+
+### Load required libraries
+The following libraries are used at various points in the analysis. A full summary of the environment during the R sessions used for this analysis is at the end of this document.
+```{r load_libraries, results='hide'}
+library(tidyr)
+library(dplyr)
+library(reshape2)
+library(data.table)
+library(tximeta)
+library(SummarizedExperiment)
+library(edgeR)
+library(RColorBrewer)
+library(ggplot2)
+library(pheatmap)
+library(ggrepel)
+library(rtracklayer)
+library(knitr)
+library(openxlsx)
+library(tibble)
+library(readxl)
+```
+
+### File paths and metadata
+This sets up paths to files, imports metadata associated with the samples and defines sample groups for the QC and statistical tests. If you have the Box app installed and you are re-running this markdown on Windows then the paths should work without needing to be edited.
+
+```{r setup_env include=FALSE}
+base_dir <- getwd() # assume root of repo
+counts_dir <- file.path(base_dir, "data", "counts")
+pdataFile <- file.path(base_dir, "data/pdata_total.csv")
+refPath <- file.path(base_dir, "data/refData")
+
+ExperimentName <- "RNASeq.THOC2.iPSC.LCL.Fibro.2026"
+```
+
+### Import sample metadata.
+If there are any samples listed here to be removed then this was likely based on a technical reason (e.g. poor quality) suggested by a preliminary analysis.  The revised analysis will follow in the markdown but the original assessment is available in the images/QC folder for review.
+
+```{r import_pdata}
+pdata<-read.table(file=pdataFile, row.names=1, header=TRUE, sep=",", as.is = FALSE)
+pdata.current<-pdata 
+samples<-as.character(pdata.current$sampleCode)
+quantFiles <- file.path(counts_dir, pdata.current$folder,"quant.sf")
+pdata.current <- data.frame(files = quantFiles, names = samples, pdata.current)
+kbl(pdata.current, caption = "<strong>Table 1: Sample metadata</strong>", escape = FALSE, format = "html") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed")) %>%
+  scroll_box(width = "100%", height = "300px")
+
+```
+
+
+### Groups for statistical tests and colour schemes
+These are complex data with genotype and cell type to be considered. The script below sets up these variables for the series of comparisons to be made with these data and the colour schemes that will be used.
+
+```{r define_tests}
+# Set up vectors of categories
+
+# Grouped categories
+variantVsGenoVsCell = factor(paste(pdata.current$variant, pdata.current$genotype, pdata.current$cellType, sep="."))
+variantVsGeno = factor(paste(pdata.current$variant, pdata.current$genotype, sep="."))
+
+
+# Define colour palettes for graphing
+SA_scheme = c("#7F0000","#B30000","#E76F51","#1A9850","#67A9CF","#023858","#008cf9")
+
+pal4Grouping =  SA_scheme[c(1:length(levels(grouping)))]
+
+
+```
+
+### Import counts data
+Counts data were generated using the *salmon_total* pipeline. The individual *quant.sf* files generated from this contain counts and TPM data which will be extracted here and combined into transcript or gene counts.
+
+```{r import_counts}
+imported.counts <- tximeta(coldata = pdata.current)
+summarised.genes = summarizeToGene(imported.counts)
+```
+
+### Export counts for differential expression analysis
+These are non-normalised counts data that will be inputs for the edgeR differential gene expression analyses.  The data are normalised during the analysis pipeline.
+```{r split_to_subfractions}
+gene.counts = assays(summarised.genes)[["counts"]]
+transcript.counts = assays(imported.counts)[["counts"]]
+counts.current<-gene.counts[,samples]
+
+write.table(gene.counts, file="results/gene.counts_total.txt", sep ="\t", quote=FALSE, row.names = TRUE, col.names = TRUE)
+write.table(transcript.counts, file="results/transcript.counts_total.txt", sep ="\t", quote=FALSE, row.names = TRUE, col.names = TRUE)
+```
+
+### Make a table of expression values
+These are normalized counts data and give an indication of the level of expression using the TPM units.  It's important to note that edgeR uses normalised CPM values to calculate differential expression so if you manually calculate fold changes from these data then you will likely not get the same result however the trend should be the same. 
+
+This short blog post goes through some of the differences in RNA-seq measures:
+https://haroldpimentel.wordpress.com/2014/05/08/what-the-fpkm-a-review-rna-seq-expression-units/
+```{r make_a_counts_summary}
+gene.TPM <- assays(summarised.genes)[["abundance"]]
+transcript.TPM <- assays(imported.counts)[["abundance"]]
+current.TPM = gene.TPM[,samples]
+```
+
+## QC
+### MDS Plot to file and show in the markdown
+The multidimensional scaling (MDS) plot shows the largest distance between samples based on the ranked largest fold changes in gene expression between each sample pair.  Only the first two factors are shown in the 2D plot. 
+```{r export_MDS_plot, echo=FALSE}
+outPath = "results/images/QC"
+d = DGEList(counts=counts.current, group=variantVsGenoVsCell)
+keep = filterByExpr(d)
+d = d[keep, , keep.lib.sizes=FALSE]
+d = calcNormFactors(d)
+
+png(filename=file.path(outPath, paste0(ExperimentName,".MDSPlot.png")), height=980, width=980, bg="white")
+par(cex=2.5, mar=c(4,4,1,1), pch=16)
+plotMDS(d, labels=pdata.current$sampleCode, col = pal4Grouping[factor(variantVsGenoVsCell)], main = "Colour by Major Groups")
+dev.off()
+```
+
+### 3D PCA Plot
+```{r 3D_PCA_plot}
+pc <- princomp(counts.current, cor=TRUE, scores=TRUE)
+summary(pc)
+
+plot3d(pc$loadings[,1:3], col=pal4majorGroups[factor(variantVsGeno)], size=2)
+text3d(pc$loadings[,1:3], text=colnames(counts.current), col = pal4majorGroups[factor(variantVsGeno)])
+
+```
+
+### Correlation Plots - between hiPSCs, fibroblasts and LCLs for respective variant.
+```{r correlation_plots}
+outPath = "results/images/Correlation"
+Test = "correlation"
+
+#matrix for TMM-normalised gene expression
+cpm_mat <- cpm(d, log=TRUE)   # log CPM is better for correlation
+
+#matrix for TMM-normalised gene expression for p.Leu438Pro variant iPSCs and LCLs
+cpm_mat_missense <- cpm(d[, d$samples$group %in% c("Missense.Variant.LCL", "Missense.Variant.iPSC")], log = TRUE)
+
+#matrix for TMM-normalised gene expression for Ex37-38 deletion variant iPSCs and fibroblasts
+cpm_mat_deletion <- cpm(d[, d$samples$group %in% c("Deletion.Variant.Fibroblast", "Deletion.Variant.iPSC")], log = TRUE)
+
+#define groups
+group_missense <- c(
+  rep("iPSC", 3),   
+  rep("LCL", 2)
+)
+
+group_deletion <- c(
+  rep("iPSC", 6),   
+  rep("Fibroblast", 1)
+)
+
+
+#average TMM-normilzed TPM values per replicate in each cell type
+avg_expr_missense <- data.frame(
+  iPSC   = rowMeans(cpm_mat_missense[, group_missense == "iPSC"]),
+  LCL    = rowMeans(cpm_mat_missense[, group_missense == "LCL"])
+)
+
+avg_expr_deletion <- data.frame(
+  iPSC   = rowMeans(cpm_mat_deletion[, group_deletion == "iPSC"]),
+  Fibroblast    = cpm_mat_deletion[, group_deletion == "Fibroblast"])
+
+
+
+#filtering columns with no expression of genes in one or the other sample approx equal to -5.453082 and -5.288261 - as these values are no counts were these samples
+
+tol <- 1e-6  # tolerance
+avg_expr_deletion <- avg_expr_deletion[
+  abs(avg_expr_deletion$iPSC - (-5.453082)) > tol &
+  abs(avg_expr_deletion$Fibroblast - (-5.453082)) > tol, ]
+
+
+avg_expr_missense <- avg_expr_missense[
+  abs(avg_expr_missense$iPSC - (-5.453082)) > tol &
+  abs(avg_expr_missense$LCL - (-5.453082)) > tol, ]
+avg_expr_missense <- avg_expr_missense[
+  abs(avg_expr_missense$iPSC - (-5.288261)) > tol &
+  abs(avg_expr_missense$LCL - (-5.288261)) > tol, ]
+
+
+
+#Define which genes here, based on the differentially expressed gene (DEG) list obtained from previous studies:  
+
+mis_LCL_DEG <- read_excel("data/DEGs/mis_LCL_DEG_p.05.xlsx")
+  
+mis_iPSC_DEG <- read_excel("C:/Users/shrey/Box/MPhil-THOC2-Bioinformatics/analysis_of_THOC2_iPSC/analyses_v4_control_comparisons/salmon_total/DEGS_list/mis_iPSC_DEG_FDR.1.xlsx")
+
+mis_common_DEG <- read_excel("data/DEGs/mis_common_DEG.xlsx")
+  
+del_fibro_DEG <-read_excel("data/DEGs/del_fibro_DEG_p.01.xlsx")
+  
+del_iPSC_DEG <- read_excel("data/DEGs/del_iPSC_DEG_FDR.05.xlsx")
+
+del_common_DEG <- read_excel("data/DEGs/del_common_DEG.xlsx")
+
+
+#plotting correlation per variant
+
+#for p.Leu438Pro variant
+cor(avg_expr_missense)
+
+#for Ex37-38 deletion variant
+cor(avg_expr_deletion)
+
+
+### SPECIFCY CELL TYPE BETWEEN WHICH YOU WANT TO PERFORM CORRELATION
+#specify correlations
+b <- "iPSC"
+a <- "LCL"
+
+
+### Specify the DEG list to select the genes for which you want to evaluate the correlation of expression across the indicated cell lines
+
+deg_genes <- mis_iPSC_DEG$ensembl_id
+
+# subset
+avg_expr_missense_deg <- avg_expr_missense[rownames(avg_expr_missense) %in% deg_genes, ]
+
+
+png(paste0("results/Correlation/correlation_iPSC_DEGs_missense_", a, "_vs_", b, ".png"), width = 2000, height = 2000, res = 300)
+
+#correlation test
+cor_test <- cor.test(avg_expr_missense_deg[[b]], avg_expr_missense_deg[[a]])
+r_val <- cor_test$estimate
+p_val <- cor_test$p.value
+
+
+# Correlation
+#r_val <- cor(avg_expr_missense[[b]], avg_expr_missense[[a]])
+
+# Plot
+plot(avg_expr_missense_deg[[b]], avg_expr_missense_deg[[a]],
+     xlab = paste(b, "(avg logCPM)"),
+     ylab = paste(a, "(avg logCPM)"),
+     pch = 16,
+     cex = 0.5,        # point size
+     cex.axis = 1.5,   # axis numbers
+     cex.lab = 1.5)    # axis labels)
+
+# Dotted lines at 0
+abline(v = 0, lty = 2, col = "grey40")
+abline(h = 0, lty = 2, col = "grey40")
+
+# Regression line
+abline(lm(avg_expr_missense_deg[[a]] ~ avg_expr_missense_deg[[b]]), col = "red")
+
+# Add R value
+text(x = min(avg_expr_missense_deg[[b]]),
+     y = max(avg_expr_missense_deg[[a]]),
+     labels = paste0("R = ", round(r_val, 3),
+                     "\np = ", signif(p_val, 3)),
+     pos = 4,
+     cex = 0.8)
+
+dev.off()
+
+# Print correlation in console
+cor(avg_expr[[b]], avg_expr[[a]])
+
+
+
+#Heatmap to visualize correlation of global gene expression in each variant between different cell types
+
+
+#for p.Leu438Pro variant
+sample_cor_missense <- cor(cpm_mat_missense)
+
+png("results/Correlation/heatmap-only_TPM_all_samples_missense.png", width = 2000, height = 2000, res = 300)
+pheatmap(sample_cor_missense)
+dev.off()
+
+
+#for Ex37-38 deletion variant
+sample_cor_deletion <- cor(cpm_mat_deletion)
+
+png("results/Correlation/heatmap-only_TPM_all_samples_deletion.png", width = 2000, height = 2000, res = 300)
+pheatmap(sample_cor_deletion)
+dev.off()
+```
+
+
+
+```{r session_info}
+sessionInfo()
+```

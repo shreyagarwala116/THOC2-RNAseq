@@ -1,0 +1,5 @@
+,sampleCode,folder,cellType,genotype,variant,sex,species,Grouping
+JL,JL,THOC2_JL,Fibroblast,Variant,Variant,Male,Human,Variant
+Control_1,Control_1,MC_60949,Fibroblast,WT,WT,Male,Human,WT
+Control_2,Control_2,MC_54365,Fibroblast,WT,WT,Male,Human,WT
+Control_3,Control_3,MC_54356,Fibroblast,WT,WT,Male,Human,WT

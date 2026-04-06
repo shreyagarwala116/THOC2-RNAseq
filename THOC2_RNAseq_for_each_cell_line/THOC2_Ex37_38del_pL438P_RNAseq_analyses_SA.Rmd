@@ -1,0 +1,1270 @@
+---
+title: "THOC2 iPSC, Fibroblasts and LCLs RNAseq Analysis Using Salmon"
+author: "Shreya Agarwala and Mark Corbett"
+date: "15/03/2026"
+output:
+  html_document:
+      toc: true
+      code_folding: hide
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rgl)
+library(kableExtra)
+```
+
+## Introduction  - EDIT AGAIN
+The following document is a summary of the analysis method of RNASeq data generated from iPSCs: wild-type (WT), variant *THOC2* Ex37-38del (2 biological clones), *THOC2* p.Leu438Pro, CRISPR-Cas9 corrected hiPSC for p.Leu438Pro (Corrected/WT).  
+The samples consist of three biological replicates of each genotype (WT, Corrected, Variant (Deletion/Missense)) extracted from induced pluripotent stem cells (iPSCs).
+Sample libraries were prepared for sequencing by the service provider BMKGene using the polyA, mRNA enrichment according to the maufacturers protocol (NEBNext® Ultra™ RNA Library Prep Kit for Illumina®).  Strand-specific sequencing was carried by BMKGene on an Illumina HiSeq using a 2 x 150 bp, paired end read strategy.
+Prior to differential gene expression analysis, RNAseq data were psuedo-mapped to the *change:ENSEMBL v84* set of human transcripts using the salmon_total pipeline refer to our [protocol document](https://docs.google.com/document/d/1TbvCCqPcnCx9Xl9MZPZgQquyuG6FG43shAobZbsFB8I/edit#heading=h.lwetuj3o1vx4) and [git repository](https://github.com/speleonut/RNASeq/tree/master/salmon_total.Illumina) for details.
+
+The fibroblasts include three control/WT lines and one Ex37-38 deletion line. 
+The LCLs include six control/WT lines and two p.Leu438Pro lines.
+They were previously sequenced as a part of different study by the Neurogenetics Group. 
+
+## Set up the environment
+The first section of the analysis sets up the software, imports sequence counts and associated sample metadata.  All codes are hidden by default to make the document easier to read but you can reveal them by clicking on *code* to see how the analysis was done.
+
+
+### Load required libraries
+The following libraries are used at various points in the analysis. A full summary of the environment during the R sessions used for this analysis is at the end of this document.
+```{r load_libraries, results='hide'}
+library(tidyr)
+library(dplyr)
+library(reshape2)
+library(data.table)
+library(tximeta)
+library(SummarizedExperiment)
+library(limma)
+library(edgeR)
+library(RColorBrewer)
+library(ggplot2)
+library(pheatmap)
+library(VennDiagram)
+library(ggrepel)
+library(rtracklayer)
+library(biomaRt)
+library(knitr)
+library(openxlsx)
+library(org.Hs.eg.db)
+library(tibble)
+library(readxl)
+library(msigdbr)
+library(clusterProfiler)
+library(magrittr)
+library(stringr)
+```
+
+### File paths and metadata
+This sets up paths to files, imports metadata associated with the samples and defines sample groups for the QC and statistical tests. If you have the Box app installed and you are re-running this markdown on Windows then the paths should work without needing to be edited.
+
+```{r setup_env include=FALSE}
+base_dir <- getwd() # assume root of repo
+counts_dir <- file.path(base_dir, "data", "counts")
+pdataFile <- file.path(base_dir, "data/metadata/pdata_iPSC.csv")  #MODIFY for pdata for LCL or fibroblasts
+refPath <- file.path(base_dir, "data/refData")
+ExperimentName <- "RNASeq.THOC2.iPSC.LCL.Fibro.2026"
+```
+
+### Import sample metadata.
+If there are any samples listed here to be removed then this was likely based on a technical reason (e.g. poor quality) suggested by a preliminary analysis.  The revised analysis will follow in the markdown but the original assessment is available in the images/QC folder for review.  In this analyses_v4_control_comparisons it was seen that there were sample mix ups which have been corrected in the sample metadata table shown below, note that the original file names were not changed which identifies the mixed up samples.
+```{r import_pdata}
+#names<-read.table(file=labelFile)
+pdata<-read.table(file=pdataFile, row.names=1, header=TRUE, sep=",", as.is = FALSE)
+pdata.current<-pdata 
+samples<-as.character(pdata.current$sampleCode)
+quantFiles <- file.path(counts_dir, pdata.current$folder,"quant.sf")
+pdata.current <- data.frame(files = quantFiles, names = samples, pdata.current)
+kbl(pdata.current, caption = "<strong>Table 1: Sample metadata</strong>", escape = FALSE, format = "html") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed")) %>%
+  scroll_box(width = "100%", height = "300px")
+
+```
+
+
+### Groups for statistical tests and colour schemes
+These are complex data with genotype and developmental age to be considered. The script below sets up these variables for the series of comparisons to be made with these data and the colour schemes that will be used.
+
+```{r define_tests}
+# Set up vectors of categories
+
+# Grouped categories
+variant = factor(paste(pdata.current$variant))
+genotype = factor(paste(pdata.current$genotype))
+grouping = factor(paste(pdata.current$Grouping))
+variantVsGeno = factor(paste(pdata.current$variant, pdata.current$genotype, sep="."))
+
+# Define colour palettes for graphing
+SA_scheme = c("#7F0000","#B30000","#E76F51","#1A9850","#67A9CF","#023858","#008cf9")
+
+pal4majorGroups = SA_scheme[c(1:length(levels(variantVsGeno)))]
+
+pal4Grouping =  SA_scheme[c(1:length(levels(grouping)))]
+
+
+# Gene and Transcript Lists
+
+THOC2_ENSG = "ENSG00000125676"
+TREX_ENSG = data.frame(Gene_Symbol = c("ALYREFF", "CHTOP", "DDX39B", "SARNP", "THOC1", "THOC2", "THOC3", "THOC5", "THOC6", "THOC7"), 
+                       ensembl_gene_id = c("ENSG00000183684", 
+                                           "ENSG00000160679",
+                                           "ENSG00000198563", 
+                                           "ENSG00000205323",
+                                           "ENSG00000079134", 
+                                           "ENSG00000125676", 
+                                           "ENSG00000051596", 
+                                           "ENSG00000100296", 
+                                           "ENSG00000131652", 
+                                           "ENSG00000163634"))
+
+# Custom sample order (if needed list sample order by name in quotes)
+
+genotype.variant.order = c("Variant.Deletion", "Variant.Missense","WT.WT", "WT.Corrected")
+genotype.grouping.order = c("Variant.JL5", "Variant.JL12", "Variant.MADV", "WT.808", "WT.MD1", "WT.MD5")
+```
+
+### Import counts data
+Counts data were generated using the *Salmon* pipeline. The individual *quant.sf* files generated from this contain counts and TPM data which will be extracted here and combined into transcript or gene counts.
+
+```{r import_counts}
+imported.counts <- tximeta(coldata = pdata.current)
+summarised.genes = summarizeToGene(imported.counts)
+```
+
+### Export counts for differential expression analysis
+These are non-normalised counts data that will be inputs for the edgeR differential gene expression analyses.  The data are normalised during the analysis pipeline.
+```{r split_to_subfractions}
+gene.counts = assays(summarised.genes)[["counts"]]
+transcript.counts = assays(imported.counts)[["counts"]]
+counts.current<-gene.counts[,samples]
+
+
+#modify the cell type - iPSC/LCL/fibroblast - based on the cell type used
+write.table(gene.counts, file="data/counts/iPSC/gene.counts.txt", sep ="\t", quote=FALSE, row.names = TRUE, col.names = TRUE)
+write.table(transcript.counts, file="data/counts/iPSC/transcript.counts.txt", sep ="\t", quote=FALSE, row.names = TRUE, col.names = TRUE)
+
+```
+
+### Make a table of expression values
+These are normalized counts data and give an indication of the level of expression using the TPM units.  It's important to note that edgeR uses normalised CPM values to calculate differential expression so if you manually calculate fold changes from these data then you will likely not get the same result however the trend should be the same. 
+
+This short blog post goes through some of the differences in RNA-seq measures:
+https://haroldpimentel.wordpress.com/2014/05/08/what-the-fpkm-a-review-rna-seq-expression-units/
+```{r make_a_counts_summary}
+gene.TPM <- assays(summarised.genes)[["abundance"]]
+transcript.TPM <- assays(imported.counts)[["abundance"]]
+current.TPM = gene.TPM[,samples]
+```
+
+## QC
+### MDS Plot to file and show in the markdown
+The multidimensional scaling (MDS) plot shows the largest distance between samples based on the ranked largest fold changes in gene expression between each sample pair.  Only the first two factors are shown in the 2D plot. Each variant has separated into a group in the graph which is expected.  All graphs are the same but the colours change to indicate different classes of covariates to help in their interpretation.  
+```{r export_MDS_plot, echo=FALSE}
+outPath = "results/iPSC/images/QC/MDSPlot" #Modify the directory based on the cell-type used
+Test = "DataQC.r1"
+d = DGEList(counts=counts.current, group=variantVsGeno)
+keep = filterByExpr(d)
+d = d[keep, , keep.lib.sizes=FALSE]
+d = calcNormFactors(d)
+
+png(filename=paste(outPath,ExperimentName,Test, "png", sep="."), height=980, width=980, bg="white")
+	par(cex=2.5, mar=c(4,4,1,1),pch=16)
+	plotMDS(d, labels=pdata.current$sampleCode, col = pal4Grouping[factor(grouping)], main = "Colour by Major Groups")
+dev.off()
+```
+
+
+```{r correlation_plots}
+
+outPath = "results/iPSC/images/Correlation" #Modify the directory based on the cell-type used
+Test = "correlation"
+
+#matrix
+cpm_mat <- cpm(d, log=TRUE)   # log CPM is better for correlation
+
+
+#define groups  
+#Modify the sample list based on the pdata information
+group <- c(
+  rep("Deletion", 3),   # JL5
+  rep("Deletion", 3),   # JL12
+  rep("Missense", 3),   # MADV
+  rep("Corrected", 3), # MADC
+  rep("Control", 3),   # 808
+  rep("Control", 3),   # MD1
+  rep("Control", 3)    # MD5
+)
+
+d$samples$group <- group
+
+
+#average tmm-normilzed tpm expression
+avg_expr <- data.frame(
+  Deletion   = rowMeans(cpm_mat[, d$samples$group == "Deletion"]),
+  Missense   = rowMeans(cpm_mat[, d$samples$group == "Missense"]),
+  Corrected = rowMeans(cpm_mat[, d$samples$group == "Corrected"]),
+  Control   = rowMeans(cpm_mat[, d$samples$group == "Control"])
+)
+
+
+#plotting correlation
+cor(avg_expr)
+
+
+#specify the groups you want to compare
+#specify correlations
+a <- "Corrected"
+b <- "Control"
+
+
+png(paste0("results/iPSC/images/Correlation/correlation_no_log_", a, "_vs_", b, ".png"), width = 2000, height = 2000, res = 300) #modify the directory based on the cell type
+
+# Correlation
+r_val <- cor(avg_expr[[b]], avg_expr[[a]])
+
+# Plot
+plot(avg_expr[[b]], avg_expr[[a]],
+     xlab = paste(b, "(avg logCPM)"),
+     ylab = paste(a, "(avg logCPM)"),
+     pch = 16,
+     cex = 0.5,        # point size
+     cex.axis = 1.5,   # axis numbers
+     cex.lab = 1.5)    # axis labels)
+
+# Regression line
+abline(lm(avg_expr[[a]] ~ avg_expr[[b]]), col = "red")
+
+# Add R value
+text(x = min(avg_expr[[b]]),
+     y = max(avg_expr[[a]]),
+     labels = paste("R =", round(r_val, 3)),
+     pos = 4,
+     cex = 1.2)
+
+dev.off()
+
+# Print correlation in console
+cor(avg_expr[[b]], avg_expr[[a]])
+
+#heatmap - to visualise the correlation between the gene expression of all the cell lines
+
+sample_cor <- cor(cpm_mat)
+
+png("results/images/iPSC/Correlation/heatmap-only_TPM_all_samples.png", width = 2000, height = 2000, res = 300) #modify the directory based on the cell type
+
+pheatmap(sample_cor)
+dev.off()
+```
+
+
+### Plot library sizes
+Library size is taken into account by edgeR during the analysis so that counts are comparable for each gene or transcripts across all samples.  Note that edgeR does not perform any normalisation of counts data between genes or transcripts (such as TPM or FPKM) because comparisons are only made per transcript or per gene, so their length is irrelevant.
+
+```{r plot_lib_sizes}
+#par(mar = c(7, 4, 2, 2) + 0.5)
+fudge = 3 # Hacky way of getting the x-axis labels positioned correctly in this plot. You will need to adjust each time. Go down if the labels are longer than the graph and up if the graph is longer than the labels
+barplot(d$samples$lib.size, 
+        xlab="Samples", 
+        ylab="Library Size", 
+        col = pal4genotype[factor(pdata.current$genotype)])
+text(seq(1, nrow(pdata.current) + fudge, by = (nrow(pdata.current) + fudge)/nrow(pdata.current)), 
+     par("usr")[3] - 0.25, 
+     cex=0.6, 
+     adj = 1.1, 
+     labels=pdata.current$sampleCode, 
+     xpd=TRUE, 
+     srt=45)
+```
+
+### 3D PCA plot
+Like the MDS plot, the principle components analysis plot is another way of looking at differences between the sample in bulk and exploring the sources of sample variation.  Unfortunately this won't render in the html, but you can see the table containing the PCA output below and some images that have been pasted in looking at each dimension.
+```{r 3D_PCA_plot}
+pc <- princomp(counts.current, cor=TRUE, scores=TRUE)
+summary(pc)
+
+plot3d(pc$loadings[,1:3], col=pal4Grouping[factor(grouping)], size=2)
+text3d(pc$loadings[,1:3], text=colnames(counts.current), col = pal4Grouping[factor(grouping)])
+
+```
+
+
+## Preliminary analysis
+This part of the scripts applies normalisation to account for library size and removes genes that have low or no expression spanning over multiple experimental groups (we don't want to throw out a transcript which is not expressed in just one group as that could be very important). Low abundance transcripts in RNA-seq data are prone to high variation and will often "pollute" the final list of differentially expressed genes due to small variations in read counts per sample that result in apparently high fold changes (e.g. CPM=1 vs CPM=2 is a twofold change but CPM=101 vs CPM=102 is the same change in read count but not a large fold change).  EdgeR applies a modest compression of fold changes from genes with low expression to account for this which can be seen in the Quasi-Likelihood dispersion plot. We then make some plots to look at the shape of the data to check it fits the typical model expected for RNAseq data.
+```{r filter_and_estimate_dispersion}
+d = DGEList(counts=counts.current, group=variantVsGeno)
+keep = filterByExpr(d)
+d = d[keep, , keep.lib.sizes=FALSE]
+d = calcNormFactors(d)
+f <- factor(variantVsGeno, levels=levels(variantVsGeno))
+design = model.matrix(~0+f)
+rownames(design) <- colnames(d)
+d = estimateDisp(d, design, robust = TRUE)
+```
+
+### Mean Variance, BCV and QL plots
+The Mean Variance plot shows the pooled variance of the counts from each sample, divided by a scaling factor calculated above (mostly this is library size). The black line indicates a standard Poisson distribution (it is usual for all other data points on the plot to be above this line) and the blue line indicates the prediction for a negative binomial model (we expect our data to lie close to this line). The blue dots are the average gene-level variance (the grey dots are the original values). The red "X" are the common dispersions of transcripts (averaged for transcripts within the bin it represents).  Overall these data look good and follow the negative binomial model reasonably closely.
+
+The biological coefficient of variation (BCV) plot shows the differences in variation per gene compared to average gene expression (standard deviation / average expression).  You can see that genes with low expression have higher variation.
+
+The Quasi-Likelihood dispersion plot shows the transformation of read count data (black to red) after applying normalisation.
+
+These plots support that these data are of good quality and will be good to perform differential gene expression.
+
+```{r, echo=FALSE}
+
+#Modify the directory based on the cell type
+
+png(filename=paste("results/iPSC/images/QC/MeanVarPlot",ExperimentName,Test,"png", sep="."), height=980, width=980, bg="white")
+	plotMeanVar(d, show.tagwise.vars=TRUE, NBline=TRUE)
+dev.off()
+png(filename=paste("results/iPSC/images/QC/BCVPlot",ExperimentName,Test,"png", sep="."), height=980, width=980, bg="white")
+	plotBCV(d)
+dev.off()
+fit <- glmQLFit(d, design, robust=TRUE)
+png(filename=paste("results/iPSC/images/QC/QLDPlot",ExperimentName,Test,"png", sep="."), height=980, width=980, bg="white")
+	plotQLDisp(fit)
+dev.off()
+```
+
+```{r plot_edgeR_QC}
+plotMeanVar(d, show.tagwise.vars=TRUE, show.raw.vars = TRUE, NBline=TRUE)
+plotBCV(d)
+plotQLDisp(fit)
+```
+
+## Data Analysis
+### Hypotheses to test
+In all cases, each variant will be tested separately. Each sample falls into one of two categories: WT or Variant.
+
+### Hypothesis 1: *THOC2* expression is correlated with genotype
+We'll start by looking at *THOC2* gene expression in each sample.
+```{r plot_THOC2_expression}
+#par(mar = c(7, 4, 2, 2) + 0.5)
+fudge = 3 # Hacky way of getting the x-axis labels positioned correctly in this plot you will need to adjust each time.
+barplot(current.TPM[THOC2_ENSG,], 
+        xlab="Samples", 
+        ylab="THOC2 TPM", 
+        col = pal4genotype[factor(pdata.current$genotype)],
+        axisnames = FALSE)
+text(seq(1, nrow(pdata.current) + fudge, by = (nrow(pdata.current) + fudge)/nrow(pdata.current)), 
+     par("usr")[3] - 0.25, 
+     cex=0.6, 
+     adj = 1.1, 
+     labels=pdata.current$sampleCode, 
+     xpd=TRUE, 
+     srt=45)
+```
+
+
+
+Notes: This expression pattern matches existing data which shows THOC2 expression has no significant change in iPSCs.
+
+### Plot TPM from all close interactors with THOC2 (based on STRING)
+Note that the TPM values are log base 2 transformed in these plots. In this way you can view all genes with a comparable y-axis.  The relative differences in gene expression are preserved but the log transformation will flatten the slope of the curves.
+
+
+```{r boxplot_TREX_expression_by_grouping} 
+#performed only for iPSC, however can be done for fibroblasts and LCLs as well. 
+
+outPath = "results/images/iPSC/TREX_complex/"
+df = current.TPM[TREX_ENSG$ensembl_gene_id,]
+df = reshape2::melt(df, id.vars = rownames(df))
+names(df) = c("ensembl_gene_id","sampleCode","TPM")
+df = left_join(df, pdata.current, by = "sampleCode")
+df = left_join(df, TREX_ENSG, by = "ensembl_gene_id")
+df= mutate(df, genotype.grouping = paste(genotype, Grouping, sep="."))
+df$genotype.grouping = factor(df$genotype.grouping, genotype.grouping.order)
+
+tick.labels = c(sprintf('THOC2\nEx37-38\nDel\nClone5'),sprintf('THOC2\nEx37-38\nDel\nClone12'),sprintf('THOC2\np.Leu438Pro'),
+                        sprintf('THOC2\np.Leu438Pro\nCorrected\nWT'),sprintf('THOC2\nWT\n808'),sprintf('THOC2\nWT\nMD1'),sprintf('THOC2\nWT\nMD5'))
+
+
+for (gene in levels(factor(df$Gene_Symbol))) {
+TREX.plot = ggplot(dplyr::filter(df, Gene_Symbol==gene), aes(x=genotype.grouping, y=log(TPM,2), colour = factor(genotype))) +
+  geom_boxplot(lwd = 1, outlier.shape = NA) +
+  scale_color_manual(values = pal4genotype, labels = legend.labels) + 
+  geom_jitter(color = "grey") + #samplecode - can be used
+  xlab("Genotype") +
+  ylab(paste("log2 TPM (", dplyr::filter(df, Gene_Symbol==gene)$ensembl_gene_id[1], ")", sep ="")) +
+  ggtitle(gene) +
+  labs(color="Genotype") +
+  scale_x_discrete(labels = tick.labels) +
+  coord_cartesian(ylim = c(-8, 9)) +  
+  #facet_wrap(~Gene_Symbol,  ncol=2) +
+  theme_bw() +
+  theme(axis.title.x = element_text(size = 20),
+      axis.title.y = element_text(size = 20, face = "bold",),
+
+      # Axis tick labels
+      axis.text.x  = element_text(size = 18, angle = 90, vjust = 0.5, hjust = 1, face = "bold",),
+      axis.text.y  = element_text(size = 18),
+
+      # Plot title
+      plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+
+      # Legend
+      legend.title = element_text(size = 20),
+      legend.text  = element_text(size = 18))
+
+  
+png(filename = paste(outPath, gene, "png", sep = "."), height=550, width=750, bg="white")
+
+  print(TREX.plot)
+dev.off()
+}
+
+```
+
+### Hypothesis 2: WT and Variant genotypes confer differences in gene expression patterns.
+In the following tables: logFC is the log2 transformed fold change between the test groups and the control group.  logCPM is the average log2 transformed CPM value for all samples, values less than 0 usually indicate a gene with low expression however it is important to remember that this value is not normalised to gene length so a shorter transcript naturally has less reads mapped than a longer transcript with an equivalent level of expression. The edgeR-Limma based model to contrast multiple groups at the same time used here. 
+
+
+```{r test_New_Model}
+outPath = "results/iPSC/DEGs_technical_replicates/"  # Modify this based on cell type and techincal/biological replicate
+
+# Make DGEList + attach group metadata
+
+y <- DGEList(counts = counts.current,
+             samples = data.frame(
+               row.names = pdata.current$sampleCode,
+               group     = pdata.current$variant,  
+               Grouping  = pdata.current$Grouping
+             ))
+# Collapse technical replicates by 'Grouping' - DEPENDS ON EXPERIMENTAL PLAN
+#    (sums counts for columns with same Grouping)
+#---------------------------
+# sanity: group must be constant within each tech replicate
+ok <- tapply(as.character(y$samples$group), y$samples$Grouping,
+             function(z) length(unique(z)) == 1)
+if (!all(ok)) stop("Inconsistent 'variant' within a technical replicate group.")
+
+y <- sumTechReps(y, ID = y$samples$Grouping) # REMOVING THIS WILL ENSURE THE SAMPLES ARE CONSIDERED AS BIOLOGICAL REPLICATES
+
+# group factor after collapsing
+group <- factor(y$samples$group, levels = c("WT","Missense","Deletion","Corrected"))  
+table(group)  # check effective n per group
+
+# Filter lowly expressed genes and normalize
+
+design <- model.matrix(~ 0 +  group)               # one column per group   #for this to work the length(groups) and all should be same and they should be similar to the ncol(y)
+
+colnames(design) <- paste0("group", levels(group)) # e.g., groupWT, groupMissense...#If a group is absent, the corresponding contrast will error—keep levels = c("WT","Corrected","Missense","Deletion") only if all are present (or drop the missing ones and adjust contrasts).
+
+keep <- filterByExpr(y, design = design)
+y <- y[keep, , keep.lib.sizes = FALSE]
+y <- calcNormFactors(y)    # TMM offsets  - normalization
+
+# vommWithQualityWeights transforms raw RNA-seq count data for linear modeling by combining voom's observational-level weights with sample-specific quality weights. It improves differential expression analysis by automatically downweighting low-quality or outlier samples, enhancing power and reducing variability
+v <- voomWithQualityWeights(y, design, plot = TRUE) #Prefer voomWithQualityWeights() for heterogeneous libraries; otherwise you can use plain voom().
+
+#Fit model and set your contrasts
+
+fit  <- lmFit(v, design)
+
+#modify this contrast list based on the pdata
+contr <- makeContrasts(
+  Missense_vs_WT   = groupMissense - groupWT,
+  Deletion_vs_WT   = groupDeletion - groupWT,
+  Variant_vs_WT    = (groupMissense + groupDeletion)/2 - groupWT,
+  Corrected_vs_WT  = groupCorrected - groupWT,
+  Missense_vs_corr = groupMissense - groupCorrected,
+  levels = design
+)
+
+#compute specified linear contrasts of coefficients from a fitted linear model (lmFit output), re-orienting the model to test differences between groups rather than absolute values. It calculates new coefficients and standard errors based on contr (a contrast matrix or vector), preparing the object for empirical Bayes moderation (eBayes) to identify differentially expressed genes.
+fit2 <- contrasts.fit(fit, contr)
+
+#perform empirical Bayes moderation on the linear model fit, specifically designed to improve differential expression analysis for RNA-seq or heterogeneous data by modeling mean-variance trends and protecting against outlier variances
+fit2 <- eBayes(fit2, trend = TRUE, robust = TRUE)
+
+#Extract results
+#TopTable returns a data.frame of all genes (number = Inf), sorted by p-value (by default), with columns like:
+
+#logFC – log2(Missense / Corrected) for that contrast
+#(positive ⇒ higher in Missense, negative ⇒ higher in Corrected)
+#AveExpr – average expression (on the voom log2 scale) -t, P.Value, adj.P.Val (BH FDR), B (log-odds of DE)
+
+#modify this based on pdata
+tt_Missense_vs_WT   <- topTable(fit2, coef = "Missense_vs_WT",   number = Inf)
+tt_Deletion_vs_WT   <- topTable(fit2, coef = "Deletion_vs_WT",   number = Inf)
+tt_Corrected_vs_WT  <- topTable(fit2, coef = "Corrected_vs_WT",   number = Inf)
+tt_Variant_vs_WT    <- topTable(fit2, coef = "Variant_vs_WT",  number = Inf)
+tt_Missense_vs_corr    <- topTable(fit2, coef = "Missense_vs_corr",  number = Inf)
+# quick summaries
+
+#decideTests - can control FDR per-contrast or across all contrasts:
+
+summary(decideTests(fit2, method = "separate")) #method="separate" (default): adjust each contrast independently. #use this for now
+
+dt <- summary(decideTests(fit2, method = "separate", adjust.method = "BH", p.value = 0.01))      # just summary, topTable() gives gene expression to get excel with all details. data between this summary and summary from topTable should be consistent. - to note, here we are filtering the chrm during toptable so the numbers can be a bit off. decideTests have no chrm filter! 
+
+chr <- c(as.character(1:22), "X","Y","MT")
+
+#Create a function to annotation and filter the genes
+annotate_and_filter <- function(tt, mart) {
+
+  ids <- sub("\\..*", "", rownames(tt))
+
+  attrs <- c("ensembl_gene_id","hgnc_symbol","description",
+             "chromosome_name","start_position","end_position",
+             "gene_biotype","entrezgene_id")
+
+  ann <- biomaRt::getBM(attributes = attrs,
+                        filters    = "ensembl_gene_id",
+                        values     = ids,
+                        mart       = mart)
+
+  ann <- ann[!duplicated(ann$ensembl_gene_id), ]
+  rownames(ann) <- ann$ensembl_gene_id
+
+  tt$ensembl_gene_id <- ids
+
+  m <- match(tt$ensembl_gene_id, ann$ensembl_gene_id)
+  tt <- cbind(tt, ann[m, setdiff(colnames(ann), "ensembl_gene_id"), drop = FALSE])
+
+  #Adding TPM values
+
+  tpm.sub <- current.TPM[tt$ensembl_gene_id, , drop = FALSE]
+
+  # Rename columns to avoid confusion
+  colnames(tpm.sub) <- paste0("TPM_", colnames(tpm.sub))
+
+  # Log-transform for reporting
+  tpm.sub <- log2(tpm.sub + 1)
+
+  tt <- cbind(tt, tpm.sub)
+  
+  
+  tt <- tt %>%
+          filter(chromosome_name %in% chr)
+}
+
+#mart <- biomaRt::useEnsembl("ensembl", "hsapiens_gene_ensembl")
+
+mart <- biomaRt::useEnsembl(
+  biomart = "genes",
+  dataset = "hsapiens_gene_ensembl",
+  mirror = "useast"   # try "uswest" or "asia" if needed
+)
+
+contrast_names <- colnames(dt)
+
+
+deg_tables_full <- lapply(contrast_names, function(con) {
+
+  # Get ALL genes statistics (topTable, all genes)
+  tt <- topTable(fit2, coef = con, number = Inf, sort.by = "none")   #default - adjust.method - BH and p-value 0.05  - we are giving a summary of all pvalue/fdr in our excel too
+
+  # Make sure decideTests vector aligns by rowname
+  # Use match() instead of direct indexing
+  de_vec <- dt[match(rownames(tt), rownames(dt)), con]
+
+  # Annotate genes
+  tt <- annotate_and_filter(tt, mart)
+
+  # Reorder columns
+  tt <- tt[, c("ensembl_gene_id",
+               "logFC","AveExpr","t","P.Value","adj.P.Val","B",
+               "hgnc_symbol","description","chromosome_name",
+               "start_position","end_position",
+               "gene_biotype","entrezgene_id",
+               grep("^TPM_", colnames(tt), value = TRUE))]
+
+  tt
+})
+
+names(deg_tables_full) <- contrast_names
+
+invisible(lapply(names(deg_tables_full), function(con) {
+  write.table(deg_tables_full[[con]],
+              file = file.path(outPath, paste0(con, "_allGenes.tsv")),
+              sep = "\t", quote = FALSE,
+              row.names = FALSE)
+}))
+
+#creating a excel workbook
+wb <- createWorkbook()
+
+for (con in names(deg_tables_full)) {
+  addWorksheet(wb, con)
+  writeDataTable(wb, con, deg_tables_full[[con]], withFilter = TRUE)
+}
+
+
+summ <- do.call(rbind, lapply(names(deg_tables_full), function(con) {
+  
+  tt <- deg_tables_full[[con]]
+  data.frame(
+    contrast = con,
+    genes_tested = nrow(tt),
+    DE_p_0.01 = sum(tt$P.Value < 0.01, na.rm = TRUE),
+    Up_p_0.01 = sum(tt$P.Value < 0.01 & tt$logFC > 0, na.rm = TRUE),
+    Down_p_0.01 = sum(tt$P.Value < 0.01 & tt$logFC < 0, na.rm = TRUE),
+    DE_FDR_0.2 = sum(tt$adj.P.Val < 0.2, na.rm = TRUE),
+    Up_FDR_0.2 = sum(tt$adj.P.Val < 0.2 & tt$logFC > 0, na.rm = TRUE),
+    Down_FDR_0.2 = sum(tt$adj.P.Val < 0.2 & tt$logFC < 0, na.rm = TRUE),
+    DE_FDR_0.05 = sum(tt$adj.P.Val < 0.05, na.rm = TRUE),
+    Up_FDR_0.05 = sum(tt$adj.P.Val < 0.05 & tt$logFC > 0, na.rm = TRUE),
+    Down_FDR_0.05 = sum(tt$adj.P.Val < 0.05 & tt$logFC < 0, na.rm = TRUE),
+     DE_FDR_0.01 = sum(tt$adj.P.Val < 0.01, na.rm = TRUE),
+    Up_FDR_0.01 = sum(tt$adj.P.Val < 0.01 & tt$logFC > 0, na.rm = TRUE),
+    Down_FDR_0.01 = sum(tt$adj.P.Val < 0.01 & tt$logFC < 0, na.rm = TRUE)
+  )
+}))
+addWorksheet(wb, "Summary")
+writeDataTable(wb, "Summary", summ)
+
+
+saveWorkbook(wb,
+             file = file.path(outPath, "limma_decideTests_allGenes.xlsx"),
+             overwrite = TRUE)
+
+message("Done:\n- TSVs in: ", outPath,
+        "\n- Excel: ", file.path(outPath, "limma_contrasts_annotated_with_TPM.xlsx"))
+
+
+
+#Plotting volcano plot for each contrast
+#can change the p-value or adjusted p-value - based on where you want the volcano plot cut-offs.
+
+co <- "Missense_vs_WT"  # change to any contrast name
+tt <- limma::topTable(fit2, coef = co, number = Inf, sort.by = "P")
+tt$neglog10P <- -log10(tt$P.Value)
+tt$neglog10FDR <- -log10(tt$adj.P.Val)
+tt$dir <- with(tt, ifelse(adj.P.Val < 0.01 & logFC > 1, "Up",
+                   ifelse(adj.P.Val < 0.01 & logFC < -1, "Down", "NS")))
+lfc_thr <- log2(2)
+
+# MA plot (AveExpr comes from voom)
+ggplot(tt, aes(x = AveExpr, y = logFC, color = dir)) +
+  geom_hline(yintercept = c(-lfc_thr, 0, lfc_thr), linetype = c(2,1,2)) +
+  geom_point(alpha = 0.65, size = 1.1) +
+  scale_color_manual(values = c(Down = "#1f77b4", NS = "grey70", Up = "#d62728")) +
+  labs(title = paste("MA plot:", co), x = "Average log2 expression", y = "log2 fold-change", color = NULL) +
+  theme_minimal(base_size = 12) + theme(legend.position = "top")
+
+# Volcano plot
+ggplot(tt, aes(x = logFC, y = neglog10FDR, color = dir)) +
+  geom_vline(xintercept = c(-lfc_thr, 0, lfc_thr), linetype = c(2,1,2)) +
+  geom_hline(yintercept = -log10(0.01), linetype = 2) +
+  geom_point(alpha = 0.65, size = 1.1) +
+  scale_color_manual(values = c(Down = "#1f77b4", NS = "grey70", Up = "#d62728")) +
+  labs(title = paste("Volcano:", co), x = "log2FC", y = "-log10(FDR)", color = NULL) +
+  theme_minimal(base_size = 12) + theme(legend.position = "top")
+
+
+```
+
+
+#GSEA analysis
+
+using https://alexslemonade.github.io/refinebio-examples/03-rnaseq/pathway-analysis_rnaseq_02_gsea.html#45_Gene_identifier_conversion
+
+Rank matrix used: 
+
+-log10(p-value) * sign of log2FC (+/-)
+
+
+```{r test_New_Model_GSEA}
+outPath = "results/iPSC/DEGs_technical_replicates/GSEA/"  #Needs to be modified to the cell type and whether were considered DEGs biological/techincal replicates
+
+#can read the excel directly through: 
+res_gsea <- read_excel("C:/Users/shrey/Box/MPhil-THOC2-Bioinformatics/analysis_of_THOC2_iPSC/analyses_v4_control_comparisons/salmon/NewModel/limma_decideTests_allGenes.xlsx", sheet = "Variant_vs_WT")
+
+#OR Specify the comparison as a continuation of the above DEG analyses
+
+comparison <- "Variant_vs_WT"   #modify based on the comparison you are performing
+
+res_gsea <- deg_tables_full[["Variant_vs_WT"]]
+
+#Cresume GSEA analyses from here: 
+
+res_gsea$ensembl_gene_id <- NULL
+
+filtered_res_gsea <- res_gsea %>%
+  # Sort so that the highest absolute values of the log2 fold change are at the
+  # top
+  dplyr::arrange(dplyr::desc(abs(logFC))) %>%
+  # Filter out the duplicated rows using `dplyr::distinct()`
+  dplyr::distinct(hgnc_symbol, .keep_all = TRUE)
+
+#checking for any duplicated symbols
+any(duplicated(filtered_res_gsea$hgnc_symbol))
+
+#rank matrix using -log10(p-value) * sign of log2FC (+/-)
+filtered_res_gsea$rank_metric <- -log10(filtered_res_gsea$P.Value) * sign(filtered_res_gsea$logFC)
+
+
+gene_list <- filtered_res_gsea$rank_metric
+
+names(gene_list) <- filtered_res_gsea$hgnc_symbol
+
+gene_list <- sort(gene_list, decreasing=TRUE)
+
+# Remove genes with empty names
+gene_list <- gene_list[names(gene_list) != ""]
+# Remove genes with empty names
+gene_list <- gene_list[names(gene_list) != 'NA']
+
+
+gene_list <- gene_list[!is.na(names(gene_list)) & names(gene_list) != ""]
+##use these to identify missing values
+which(names(gene_list) == "")
+which(is.na(names(gene_list)))
+
+write.table(gene_list,paste0(outPath, "GSEA_ranks_FINAL_", comparison, ".tsv"), sep="\t", quote=FALSE, col.names=FALSE)
+
+# Hallmark gene sets
+m_df <- msigdbr(species = "Homo sapiens", collection = "H") %>%
+       dplyr::select(gs_name, gene_symbol)
+# Reactome gene sets
+rtm_df <- msigdbr(species = "Homo sapiens", collection = "C2", subcollection = "CP:REACTOME") %>%
+       dplyr::select(gs_name, gene_symbol)
+# Wikipathways gene sets
+wk_df <- msigdbr(species = "Homo sapiens", collection = "C2", subcollection = "CP:WIKIPATHWAYS") %>%
+       dplyr::select(gs_name, gene_symbol)
+
+# gene identifier conversion
+
+keytypes(org.Hs.eg.db)
+
+set.seed(2020)
+
+#Hallmark
+gsea_res_h <- GSEA(
+  gene_list,
+  TERM2GENE = m_df,
+  pvalueCutoff = 0.1,
+  pAdjustMethod = "BH",
+  seed = TRUE
+)
+
+#Reactome
+gsea_res_rtm <- GSEA(
+  gene_list,
+  TERM2GENE = rtm_df,
+  pvalueCutoff = 0.1,
+  pAdjustMethod = "BH",
+  seed = TRUE
+)
+
+#WikiPathways
+gsea_res_wk <- GSEA(
+  gene_list,
+  TERM2GENE = wk_df,
+  pvalueCutoff = 0.1,
+  pAdjustMethod = "BH",
+  seed = TRUE
+)
+# Output for Each gene set
+write.csv(as.data.frame(gsea_res_h), paste0(outPath, "GSEA_HALLMARK_results_", comparison, ".csv"), row.names=FALSE)
+
+write.csv(as.data.frame(gsea_res_rtm), paste0(outPath, "GSEA_REACTOME_results_", comparison, ".csv"), row.names=FALSE)
+
+write.csv(as.data.frame(gsea_res_wk), paste0(outPath, "GSEA_WIKI_results_", comparison, ".csv"), row.names=FALSE)
+
+
+#GSEA Barplots
+
+
+#hallmark
+df <- as.data.frame(gsea_res_h)
+# Order by NES
+# Select top 20 by absolute NES
+df_top <- df %>%
+  arrange(desc(abs(NES))) %>%
+  slice(1:20)
+# Then order from most positive to most negative NES
+df_top <- df_top %>%
+  arrange(desc(NES))
+# Take top 20 pathways
+df_top <- df[1:20, ]
+#barplot
+p <- ggplot(df_top, aes(x = NES, y = reorder(Description, NES), fill = p.adjust)) +
+  geom_bar(stat = "identity") +
+  scale_fill_gradient(
+    low = "red",     # more significant
+    high = "blue",   # less significant
+    name = "adj p-value"
+  ) +
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 40)) +
+  theme_bw() +
+  labs(
+    x = "Normalized Enrichment Score (NES)",
+    y = "Pathway"
+  ) +
+  theme(
+    axis.text.y = element_text(size = 14),
+    axis.text.x = element_text(size = 14)
+  )
+ggsave(
+  paste0(outPath, "GSEA_HALLMARK_barplot_", comparison, ".png"),
+  plot = p,
+  width = 14,
+  height = 8,
+  dpi = 300
+)
+
+
+#reactome
+df <- as.data.frame(gsea_res_rtm)
+# Order by NES
+# Select top 20 by absolute NES
+df_top <- df %>%
+  arrange(desc(abs(NES))) %>%
+  slice(1:20)
+# Then order from most positive to most negative NES
+df_top <- df_top %>%
+  arrange(desc(NES))
+# Take top 20 pathways
+df_top <- df[1:20, ]
+#barplot
+p <- ggplot(df_top, aes(x = NES, y = reorder(Description, NES), fill = p.adjust)) +
+  geom_bar(stat = "identity") +
+  scale_fill_gradient(
+    low = "red",     # more significant
+    high = "blue",   # less significant
+    name = "adj p-value"
+  ) +
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 40)) +
+  theme_bw() +
+  labs(
+    x = "Normalized Enrichment Score (NES)",
+    y = "Pathway"
+  ) +
+  theme(
+    axis.text.y = element_text(size = 14),
+    axis.text.x = element_text(size = 14)
+  )
+ggsave(
+  paste0(outPath, "GSEA_REACTOME_barplot_", comparison, ".png"),
+  plot = p,
+  width = 14,
+  height = 8,
+  dpi = 300
+)
+
+
+#wiki
+df <- as.data.frame(gsea_res_wk)
+# Order by NES
+# Select top 20 by absolute NES
+df_top <- df %>%
+  arrange(desc(abs(NES))) %>%
+  slice(1:20)
+# Then order from most positive to most negative NES
+df_top <- df_top %>%
+  arrange(desc(NES))
+# Take top 20 pathways
+df_top <- df[1:20, ]
+#barplot
+p <- ggplot(df_top, aes(x = NES, y = reorder(Description, NES), fill = p.adjust)) +
+  geom_bar(stat = "identity") +
+  scale_fill_gradient(
+    low = "red",     # more significant
+    high = "blue",   # less significant
+    name = "adj p-value"
+  ) +
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 40)) +
+  theme_bw() +
+  labs(
+    x = "Normalized Enrichment Score (NES)",
+    y = "Pathway"
+  ) +
+  theme(
+    axis.text.y = element_text(size = 14),
+    axis.text.x = element_text(size = 14)
+  )
+ggsave(
+  paste0(outPath, "GSEA_WIKI_barplot_", comparison, ".png"),
+  plot = p,
+  width = 14,
+  height = 8,
+  dpi = 300
+)
+
+
+
+
+# Create folders to save all the enrichment plots for top 20 pathway in each gene set - Hallmark, Reactome, WikiPathways
+base_dir <- paste0("results/iPSC/DEGs_technical_replicates/GSEA/", comparison)  
+
+plot_dirs <- list(
+  Hallmark = file.path(base_dir, "GSEA_plots_hallmark"),
+  Reactome = file.path(base_dir, "GSEA_plots_reactome"),
+  WikiPathways = file.path(base_dir, "GSEA_plots_wikipathways")
+)
+
+# Make directories if they don't exist
+lapply(plot_dirs, function(dir) if(!dir.exists(dir)) dir.create(dir, recursive = TRUE))
+
+# Put your GSEA results into a named list
+gsea_results_list <- list(
+  Hallmark = gsea_res_h,
+  Reactome = gsea_res_rtm,
+  WikiPathways = gsea_res_wk
+)
+
+# Loop through each GSEA result
+for (res_name in names(gsea_results_list)) {
+  
+  gsea_res_current <- gsea_results_list[[res_name]]
+  gsea_df <- data.frame(gsea_res_current@result)
+  
+  # Select top 20 significant pathways
+  top20_pathways <- gsea_df %>%
+    arrange(p.adjust) %>%
+    slice(1:20) %>%
+    pull(ID)
+  
+  # Get the folder for this type
+  out_dir <- plot_dirs[[res_name]]
+  
+  # Loop through each pathway and save plot
+  for (pathway in top20_pathways) {
+    
+    p <- gseaplot(
+      gsea_res_current,
+      geneSetID = pathway,
+      title = str_wrap(pathway, width = 8),
+      color.line = "#0d76ff"
+    )
+    
+    ggsave(
+      filename = paste0(out_dir, "/", pathway, ".png"),
+      plot = p,
+      width = 8,
+      height = 6
+    )
+  }
+}
+
+```
+
+### Hypothesis 3: WT and Variant genotypes have different expression of pluripotency markers and R-loop enrichmed genes in [Yan P, Liu Z, Song M, Wu Z, Xu W, Li K, Ji Q, Wang S, Liu X, Yan K, Esteban CR, Ci W, Belmonte JCI, Xie W, Ren J, Zhang W, Sun Q, Qu J, Liu GH. Genome-wide R-loop Landscapes during Cell Differentiation and Reprogramming. Cell Rep. 2020 Jul 7;32(1):107870. doi: 10.1016/j.celrep.2020.107870. PMID: 32640235].
+
+This was performed for iPSC lines ONLY.
+
+### Plot and export TPM for PLURIPOTENCY genes
+```{r set_up_pluripotency_list}
+ensembl <- biomaRt::useEnsembl("ensembl", "hsapiens_gene_ensembl")
+
+#in-house compiled list of pluripotency-associated genes (Polo Lab, SAiGENCI, Adelaide University)
+gene.list=c("POU5F1","NANOG","SOX2","KLF4","MYC","LIN28A","LIN28B","ESRRB","TFCP2L1","KLF2","KLF5","TBX3","DPPA2","DPPA3","DPPA4","ZFP42","UTF1","SALL4","GDF3","LEFTY1","LEFTY2","PRDM14","DNMT3A","DNMT3B","DNMT3L","TET1","TET2","TET3","EZH2","SUZ12","EED","SIRT1","PODXL","SSEA3","SSEA4","CD9","CD24","PROM1","NCAM1","KLF17","TCL1A","DPPA5","OTX2","ZIC2","ZIC3","FGF5","DUSP6","NODAL","CD24","EPCAM","CDH1","CLDN3","CLDN4","OCLN","VIM","ZEB1","ZEB2","SNAI1","SNAI2","TWIST1","GLIS1","NR5A2","RARG","TP53","CDKN1A","CCND1","MDM2","FGF2","TGFBR1","SMAD2","SMAD3","SMAD4","WNT3A","CTNNB1","LIF","STAT3","PIK3CA","AKT1","GATA6","SOX17","TBXT","CDX2","ELF5")
+pluripotency_genes=getBM(attributes = c('hgnc_symbol', 'ensembl_gene_id'), filters='hgnc_symbol', values = gene.list, mart = ensembl)
+pluripotency_genes
+
+#acquiring DEGs of Variants vs WT 
+degs_iPSC <- read_excel("results/iPSC/DEGs_technical_replicates/limma_decideTests_allGenes.xlsx", sheet = "Variant_vs_WT")
+
+#filter rows based on FDR < 0.05
+degs_iPSC <- degs_iPSC[degs_iPSC$adj.P.Val < 0.05,]
+
+
+#Common genes between degs_iPSC and rloop_genes
+
+filtered_pluripotency_genes <- pluripotency_genes[
+  pluripotency_genes$ensembl_gene_id %in% degs_iPSC$ensembl_gene_id,
+]
+
+pluripotency_genes <- filtered_pluripotency_genes
+
+```
+
+check that all symbols are represented and that there are no duplicates
+```{r line_plot_pluripotency_expression}
+#to find the overlapping list between pluripotency gene list and TPM of RNA seq data
+valid_ids <- intersect(pluripotency_genes$ensembl_gene_id,
+                       rownames(current.TPM))    #use TPM for heatmaps etc
+
+df <- current.TPM[valid_ids, ]
+
+#to check which genes are missing
+missing <- pluripotency_genes$ensembl_gene_id[!
+                 pluripotency_genes$ensembl_gene_id %in% rownames(current.TPM)]
+
+missing
+if (length(missing) > 0) {
+  warning("These genes were not found in current.TPM: ",
+          paste(missing, collapse = ", "))
+}
+
+#genes not found: ENSG00000237582, ENSG00000233911, ENSG00000235068
+
+# Suppose df or matrix has rownames as Ensembl IDs
+remove_ids <- c("ENSG00000237582", "ENSG00000233911", "ENSG00000235068")
+
+df <- df[!rownames(df) %in% remove_ids, ]
+
+# combining the gene ids of all pouf51 genes into one
+
+df = reshape2::melt(df, id.vars = rownames(df))
+names(df) = c("ensembl_gene_id","sampleCode","TPM")
+df = left_join(df, pdata.current, by = "sampleCode")
+df = left_join(df, pluripotency_genes, by = "ensembl_gene_id")
+df= mutate(df, genotype.variant = paste(genotype, variant, sep="."))
+df$genotype.variant = factor(df$genotype.variant, genotype.variant.order)
+
+df_gene <- df %>%
+  group_by(hgnc_symbol, sampleCode) %>%
+  summarise(
+    TPM = mean(TPM, na.rm = TRUE),
+    ensembl_gene_id = paste(unique(ensembl_gene_id), collapse = ";"),
+    files = dplyr::first(files),
+    names = dplyr::first(names),
+    folder = dplyr::first(folder),
+    cellType = dplyr::first(cellType),
+    genotype = dplyr::first(genotype),
+    variant = dplyr::first(variant),
+#    variant_type = dplyr::first(variant_type),
+    sex = dplyr::first(sex),
+    species = dplyr::first(species),
+    RIN = dplyr::first(RIN),
+    Grouping = dplyr::first(Grouping),
+    genotype.variant = dplyr::first(genotype.variant),
+    .groups = "drop"
+  ) %>%
+  ungroup() %>%     # ensure it’s clean
+  as.data.frame()   # force normal df (prevents tibble/matrix issues)
+
+
+#HeatMap - using log2(TPM+1) values
+
+heatmap_mat <- df %>%
+  group_by(hgnc_symbol, sampleCode) %>%
+  summarise(TPM = mean(TPM, na.rm = TRUE)) %>%  # collapse multiple ensembl IDs
+  tidyr::pivot_wider(names_from = sampleCode, values_from = TPM) %>%
+  column_to_rownames("hgnc_symbol") %>%
+  as.matrix()
+
+# log2 (x+1) = makes all the values of log2TPM zero where there is no expression for that gene  
+heatmap_mat_log2 <- log2(heatmap_mat + 1)
+
+png("results/iPSC/images/Pluripotency/heatmap/iPSC_DEGS_pluripotency_heatmap_log2tpm_1.png", width = 2000, height = 2000, res = 300)
+pheatmap(
+  heatmap_mat_log2,
+  color = colorRampPalette(c("white", "darkblue"))(100),
+  cluster_rows = TRUE,
+  cluster_cols = FALSE,
+  show_rownames = TRUE,
+  show_colnames = TRUE,
+  fontsize = 4,
+  main = "Gene Expression iPSC DEGS PLURIPOTENCY Heatmap (log2 TPM  + 1)"
+)
+dev.off()
+
+
+#HeatMap using Normalized z-score expression
+
+#Clubbing replicates together 
+
+JL5 <- c("JL5-1", "JL5-2", "JL5-3")
+JL12 <- c("JL12-1", "JL12-2", "JL12-3")
+MADV <- c("MADV1", "MADV2", "MADV3")
+MADC <- c("MADC1", "MADC2", "MADC3")
+c808 <- c("808-1", "808-2", "808-3")
+MD1 <- c("MD1-1", "MD1-2", "MD1-3")
+MD5 <- c("MD5-1", "MD5-2", "MD5-3")
+
+
+heatmap_avg <- data.frame(
+  JL5 = rowMeans(heatmap_mat[, JL5]),
+  JL12 = rowMeans(heatmap_mat[, JL12]),
+  MADV = rowMeans(heatmap_mat[, MADV]),
+  MADC = rowMeans(heatmap_mat[, MADC]),
+  c808 = rowMeans(heatmap_mat[, c808]),
+  MD1 = rowMeans(heatmap_mat[, MD1]),
+  MD5 = rowMeans(heatmap_mat[, MD5])
+)
+
+# Z-score by gene (row scaling)
+heatmap_mat_z <- t(scale(t(heatmap_avg)))
+
+png("results/iPSC/images/Pluripotency/heatmap/iPSC_DEGS_PLURIPOTENCY_CLUS_z_score_heatmap.png", width = 2000, height = 2000, res = 300)
+pheatmap(
+  heatmap_mat_z,
+  #color = colorRampPalette(c("white", "darkblue"))(100),  
+  color = colorRampPalette(c("red", "white", "blue"))(100),
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  show_rownames = TRUE,
+  show_colnames = TRUE,
+  fontsize = 6,
+  main = "hiPSC DEGS PLURIPOTENCY Z-score"
+)
+dev.off()
+
+```
+
+
+### Plot and export TPM for R-LOOP ASSOCIATED GENES
+```{r set_up_rloop_list}
+
+rloop_genes <- read_excel("results/iPSC/images/Rloop/all_rloop_hiPSC_gene_list.xlsx")
+rloop_genes
+
+#acquiring DEGs of Variants vs WT 
+degs_iPSC <- read_excel("results/iPSC/DEGs_technical_replicates/limma_decideTests_allGenes.xlsx", sheet = "Variant_vs_WT")
+
+#filter rows based on FDR < 0.05
+degs_iPSC <- degs_iPSC[degs_iPSC$adj.P.Val < 0.05,]
+
+#Common genes between degs_iPSC and rloop_genes
+filtered_rloop_genes <- rloop_genes[
+  rloop_genes$ensembl_gene_id %in% degs_iPSC$ensembl_gene_id,
+]
+rloop_genes <- filtered_rloop_genes
+rloop_genes
+```
+
+check that all symbols are represented and that there are no duplicates
+```{r heatmap_rloop_expression}
+#to find the overlapping list between rloop gene list and TPM of RNA seq data
+valid_ids <- intersect(rloop_genes$ensembl_gene_id,
+                       rownames(current.TPM))    #use TPM for heatmaps etc
+
+df <- current.TPM[valid_ids, ]
+#to check how many genes are there
+not_missing<- rloop_genes$ensembl_gene_id[
+                 rloop_genes$ensembl_gene_id %in% rownames(current.TPM)]
+#to check which genes are missing
+missing <- rloop_genes$ensembl_gene_id[!
+                 rloop_genes$ensembl_gene_id %in% rownames(current.TPM)]
+missing
+if (length(missing) > 0) {
+  warning("These genes were not found in current.TPM: ",
+          paste(missing, collapse = ", "))
+}
+#genes not found: 0
+
+# Suppose df or matrix has rownames as Ensembl IDs
+remove_ids <- c()
+
+df <- df[!rownames(df) %in% missing, ]
+
+# combining the gene ids of all pouf51 genes into one
+
+df = reshape2::melt(df, id.vars = rownames(df))
+names(df) = c("ensembl_gene_id","sampleCode","TPM")
+df = left_join(df, pdata.current, by = "sampleCode")
+df = left_join(df, rloop_genes, by = "ensembl_gene_id")
+df= mutate(df, genotype.variant = paste(genotype, variant, sep="."))
+df$genotype.variant = factor(df$genotype.variant, genotype.variant.order)
+
+df_gene <- df %>%
+  group_by(hgnc_symbol, sampleCode) %>%
+  summarise(
+    TPM = mean(TPM, na.rm = TRUE),
+    ensembl_gene_id = paste(unique(ensembl_gene_id), collapse = ";"),
+    files = dplyr::first(files),
+    names = dplyr::first(names),
+    folder = dplyr::first(folder),
+    cellType = dplyr::first(cellType),
+    genotype = dplyr::first(genotype),
+    variant = dplyr::first(variant),
+#    variant_type = dplyr::first(variant_type),
+    sex = dplyr::first(sex),
+    species = dplyr::first(species),
+    RIN = dplyr::first(RIN),
+    Grouping = dplyr::first(Grouping),
+    genotype.variant = dplyr::first(genotype.variant),
+    .groups = "drop"
+  ) %>%
+  ungroup() %>%     # ensure it’s clean
+  as.data.frame()   # force normal df (prevents tibble/matrix issues)
+
+#for heatmap
+heatmap_mat <- df %>%
+  group_by(hgnc_symbol, sampleCode) %>%
+  summarise(TPM = mean(TPM, na.rm = TRUE)) %>%  # collapse multiple ensembl IDs
+  tidyr::pivot_wider(names_from = sampleCode, values_from = TPM) %>%
+  column_to_rownames("hgnc_symbol") %>%
+  as.matrix()
+
+#heatmap with log2(TPM + 1) values
+# log2 (x+1) = makes all the values of log2TPM zero where there is no expression for that gene  
+heatmap_mat_log2 <- log2(heatmap_mat + 1)
+
+png("results/iPSC/images/Rloop/heatmap/iPSC_DEGS_rloop_hiPSC_heatmap_log2tpm_1.png", width = 2000, height = 2000, res = 300)
+pheatmap(
+  heatmap_mat_log2,
+  color = colorRampPalette(c("white", "darkblue"))(100),
+  cluster_rows = TRUE,
+  cluster_cols = FALSE,
+  show_rownames = TRUE,
+  show_colnames = TRUE,
+  fontsize = 4,
+  main = "Gene Expression Rloops signal in hiPSC data - in our iPSC DEGs Heatmap (log2 TPM  + 1)"
+)
+dev.off()
+
+
+#heatmap with normalized Z-scores
+
+#Clubbing replicates together 
+
+JL5 <- c("JL5-1", "JL5-2", "JL5-3")
+JL12 <- c("JL12-1", "JL12-2", "JL12-3")
+MADV <- c("MADV1", "MADV2", "MADV3")
+MADC <- c("MADC1", "MADC2", "MADC3")
+c808 <- c("808-1", "808-2", "808-3")
+MD1 <- c("MD1-1", "MD1-2", "MD1-3")
+MD5 <- c("MD5-1", "MD5-2", "MD5-3")
+
+
+heatmap_avg <- data.frame(
+  JL5 = rowMeans(heatmap_mat[, JL5]),
+  JL12 = rowMeans(heatmap_mat[, JL12]),
+  MADV = rowMeans(heatmap_mat[, MADV]),
+  MADC = rowMeans(heatmap_mat[, MADC]),
+  c808 = rowMeans(heatmap_mat[, c808]),
+  MD1 = rowMeans(heatmap_mat[, MD1]),
+  MD5 = rowMeans(heatmap_mat[, MD5])
+)
+
+# Z-score by gene (row scaling)
+heatmap_mat_z <- t(scale(t(heatmap_avg)))
+
+heatmap_mat_z  <- heatmap_mat_z [!apply(heatmap_mat_z , 1, function(row) any(is.nan(row))), ]
+
+png("results/iPSC/images/Rloop/heatmap//iPSC_DEGS_rloop_hiPSC_CLUS_TRUE_z_score.png", width = 2000, height = 3000, res = 300)
+pheatmap(
+  heatmap_mat_z,
+  #color = colorRampPalette(c("white", "darkblue"))(100),  
+  color = colorRampPalette(c("red", "white", "blue"))(100),
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  show_rownames = TRUE,
+  show_colnames = TRUE,
+  fontsize = 4,
+  main = "Rloops signal in hiPSC data - in our iPSC DEGs Z-score"
+)
+dev.off()
+```
+
+
+## References
+
+Patro R, Duggal G, Love MI, Irizarry RA, Kingsford C. Salmon: fast and bias-aware quantification of transcript expression using dual-phase inference. Nat Methods. 2017 Apr;14(4):417–9.
+Love MI, Soneson C, Hickey PF, Johnson LK, Pierce NT, Shepherd L, Morgan M, Patro R. Tximeta: Reference sequence checksums for provenance identification in RNA-seq PLOS Computational Biology 16(2): e1007664
+McCarthy DJ, Chen Y, Smyth GK. Differential expression analysis of multifactor RNA-Seq experiments with respect to biological variation. Nucleic Acids Res. 2012 May;40(10):4288–97. 
+Durinck S, Spellman PT, Birney E, Huber W. Mapping identifiers for the integration of genomic datasets with the R/Bioconductor package biomaRt. , Nature Protocols 4, 1184-1191 (2009).
+Durinck S, Moreau Y, Kasprzyk A, Davis S, De Moor , Brazma A, Huber W. BioMart and Bioconductor: a powerful link between biological databases and microarray data analysis.
+Stolarczyk, M., et al., Refgenie: a reference genome resource manager. Gigascience, 2020. 9(2).
+Robinson, M.D., D.J. McCarthy, and G.K. Smyth, edgeR: a Bioconductor package for differential expression analysis of digital gene expression data. Bioinformatics, 2010. 26(1): p. 139-40.
+Ritchie, M.E., et al., limma powers differential expression analyses for RNA-sequencing and microarray studies. Nucleic Acids Research, 2015. 43(7): p. e47-e47.
+Smedley, D., et al., BioMart--biological queries made easy. BMC Genomics, 2009. 10: p. 22.
+Ge, S.X., D. Jung, and R. Yao, ShinyGO: a graphical gene-set enrichment tool for animals and plants. Bioinformatics, 2019. 36(8): p. 2628-2629.
+Yu, G., et al., clusterProfiler: an R Package for Comparing Biological Themes Among Gene Clusters. OMICS: A Journal of Integrative Biology, 2012. 16(5): p. 284-287.
+Subramanian, A., et al., Gene set enrichment analysis: A knowledge-based approach for interpreting genome-wide expression profiles. Proceedings of the National Academy of Sciences, 2005. 102(43): p. 15545-15550.
+Korotkevich, G., V. Sukhov, and A. Sergushichev, Fast gene set enrichment analysis. bioRxiv, 2019: p. 060012.
+Kolde, R., pheatmap: Pretty Heatmaps. R package, 2025.
+
+## Session Information
+This information documents the computing environment used to do this analysis to enable others to replicate these findings.
+```{r session_info}
+sessionInfo()
+```
