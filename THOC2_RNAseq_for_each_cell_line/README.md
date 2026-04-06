@@ -19,8 +19,8 @@ The file was too large for GitHub. Please visit https://www.ncbi.nlm.nih.gov/dat
 - `results/` - Output plots for each cell line
 
 ## Folder Structure
-THOC2_RNAseq/ \n
-│ \n
+THOC2_RNAseq/ \
+│ \
 ├── data/
 │ ├── counts/ # Gene and transcript counts
 │ │ ├── fibroblast/
